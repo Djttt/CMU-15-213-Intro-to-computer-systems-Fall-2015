@@ -138,9 +138,11 @@ NOTES:
  *   Legal ops: ~ &
  *   Max ops: 14
  *   Rating: 1
+ *   Xor x^y = (x | y) & ~(x & y)
+ *   x | y = ~(~x & ~y)
  */
 int bitXor(int x, int y) {
-  return 2;
+    return ~(~x & ~y) & ~(x & y);
 }
 /* 
  * tmin - return minimum two's complement integer 
@@ -149,7 +151,7 @@ int bitXor(int x, int y) {
  *   Rating: 1
  */
 int tmin(void) {
-  return 2;
+    return 1 << 31;
 }
 //2
 /*
@@ -160,7 +162,14 @@ int tmin(void) {
  *   Rating: 2
  */
 int isTmax(int x) {
-  return 2;
+    // ideal:
+    // Tmin + Tmax = - 1, Tmax + 1 = Tmin;
+    // 确保x != -1
+    int y = x + 1;
+    int sum = x + y;
+
+    return !(sum + 1) & !!(x + 1);
+         
 }
 /* 
  * allOddBits - return 1 if all odd-numbered bits in word set to 1
@@ -170,7 +179,9 @@ int isTmax(int x) {
  *   Rating: 2
  */
 int allOddBits(int x) {
-  return 2;
+    int odd = 0xAA << 24 | 0xAA << 16 | 0xAA << 8 | 0xAA;
+    int x_hat = x & odd;
+    return !(x_hat ^ odd);
 }
 /* 
  * negate - return -x 
@@ -180,7 +191,7 @@ int allOddBits(int x) {
  *   Rating: 2
  */
 int negate(int x) {
-  return 2;
+    return (~x) + 1;
 }
 //3
 /* 
@@ -193,7 +204,15 @@ int negate(int x) {
  *   Rating: 3
  */
 int isAsciiDigit(int x) {
-  return 2;
+    int negX = (~x) + 1;
+    
+    int lowerBound = 0x30;
+    int higherBound = 0x39;
+
+    int ge_lower = !(x + (~lowerBound + 1) >> 31);
+    int le_higher = !(higherBound + negX >> 31);
+
+    return ge_lower & le_higher;
 }
 /* 
  * conditional - same as x ? y : z 
@@ -203,7 +222,8 @@ int isAsciiDigit(int x) {
  *   Rating: 3
  */
 int conditional(int x, int y, int z) {
-  return 2;
+    int mask = ~(!x) + 1;
+    return (mask & z) | (~mask & y);
 }
 /* 
  * isLessOrEqual - if x <= y  then return 1, else return 0 
@@ -213,7 +233,19 @@ int conditional(int x, int y, int z) {
  *   Rating: 3
  */
 int isLessOrEqual(int x, int y) {
-  return 2;
+    int neg_x = (~x) + 1;
+    int diff = y + neg_x;
+    
+    int x_sign = x >> 31 & 1;
+    int y_sign = y >> 31 & 1;
+    int diff_sign = diff >> 31 & 1;
+    
+    int sign_diff = x_sign ^ y_sign;
+    int x_less_y = sign_diff & x_sign;
+
+    int same_sign = !sign_diff & !diff_sign;
+
+    return same_sign | x_less_y;
 }
 //4
 /* 
@@ -225,7 +257,15 @@ int isLessOrEqual(int x, int y) {
  *   Rating: 4 
  */
 int logicalNeg(int x) {
-  return 2;
+    // Ideal: for all x != 0, x and -x at least have one in signature has one 
+    // and x = 0, x and -x in signature all equals 0.
+
+    int neg_x = (~x) + 1;
+    int x_sign = x >> 31 & 1;
+    int neg_x_sign = neg_x >> 31 & 1;
+    
+    return (x_sign | neg_x_sign) ^ 1;
+
 }
 /* howManyBits - return the minimum number of bits required to represent x in
  *             two's complement
@@ -240,7 +280,31 @@ int logicalNeg(int x) {
  *  Rating: 4
  */
 int howManyBits(int x) {
-  return 0;
+
+  int sign, b16, b8, b4, b2, b1, b0;
+  sign = x >> 31;
+  x = x ^ sign;
+
+  b16 = (!!(x >> 16)) << 4;
+  x = x >> b16;
+  
+  b8 = !!(x >> 8) << 3;
+  x = x >> b8;
+
+  b4 = !!(x >> 4) << 2;
+  x = x >> b4;
+
+  b2 = !!(x >> 2) << 1;
+  x = x >> b2;
+
+
+  b1 = !!(x >> 1);
+  x = x >> b1;
+
+  b0 = x;
+
+  return b16 + b8 + b4 + b2 + b1 + b0 + 1;
+
 }
 //float
 /* 
@@ -255,7 +319,34 @@ int howManyBits(int x) {
  *   Rating: 4
  */
 unsigned float_twice(unsigned uf) {
-  return 2;
+    int sign = uf & 0x80000000;    
+    int exp = (uf >> 23) & 0xff;
+    int frac = uf & 0x7fffff;
+
+    // Case1: NaN or infinity
+    if (exp == 0xFF) {
+      return uf;
+    }
+
+    // Case2: denormalize
+    if (exp == 0x00) {
+        frac <<= 1;
+        // check if shifting caused normalization
+        if (frac & 0x800000) {
+          exp = 1;
+          frac = frac & 0x7fffff;
+        }
+        return sign | exp << 23 | frac;
+    }
+
+    // Case3: normalized(0 < exp < 255)
+    exp += 1;
+    if (exp == 0xff) {
+      // return infinity number
+      return sign | 0xff << 23;
+    }    
+    return sign | exp << 23 | frac;
+
 }
 /* 
  * float_i2f - Return bit-level equivalent of expression (float) x
@@ -267,7 +358,60 @@ unsigned float_twice(unsigned uf) {
  *   Rating: 4
  */
 unsigned float_i2f(int x) {
-  return 2;
+    
+    unsigned temp, frac;
+    int sign, count, exp, frac_shift, extra, halfway;
+    
+    unsigned abs_x = x;
+    sign = 0;
+    // Case 1: if x == 0 
+    if (x == 0) {
+      return x;
+    }
+    
+    // Case 2: x != 0
+    // step 1: find highest 1 in bit-leve。
+    // 如果x 为最小的Tmin 没有对应的Tmax， 下面while循环会陷入死循环。
+    if (x < 0) {
+      sign = 1 << 31;
+      abs_x = -x;
+    }
+
+    // Step 1: find highest bit 1
+    count = 0;
+    temp = abs_x;
+    while ((temp >>= 1)) {
+      count++;
+    }
+    
+    // Step 2: compute exponent.
+    exp = count + 127;
+
+    // Step 3: compute frac.
+    frac_shift = count - 23;
+
+    // shift right
+    if (frac_shift > 0) {
+      extra = abs_x & ((1 << frac_shift) - 1);
+      frac = abs_x >> frac_shift & 0x7fffff;
+      
+      // Round to even
+      halfway = 1 << (frac_shift - 1);
+      if (extra > halfway || (extra == halfway && (frac & 1))) {
+        frac += 1;
+        // frac 溢出
+        if (frac >> 23) {
+            exp++;        
+        }
+      }
+    }
+    else {
+      // shift left
+      frac = abs_x << (-frac_shift);
+    }
+
+    return sign | exp << 23 | (frac & 0x7fffff);
+
 }
 /* 
  * float_f2i - Return bit-level equivalent of expression (int) f
@@ -282,5 +426,35 @@ unsigned float_i2f(int x) {
  *   Rating: 4
  */
 int float_f2i(unsigned uf) {
-  return 2;
+    int sign = uf >> 31;
+    int exp = (uf >> 23) & 0xff;
+    int frac = uf & 0x7fffff;
+    int E = exp - 127;
+    unsigned result;
+
+    if (exp == 0xFF || E > 31) {
+        return 0x80000000u;
+    }
+
+    if (E < 0) {
+        return 0;
+    }
+
+    // 加上隐含的前导 1
+    frac |= 1 << 23;
+    
+    if (E > 23) {
+        result = frac << (E - 23);
+    } else {
+        result = frac >> (23 - E);
+    }
+
+    // ❗ 溢出检查（关键：INT_MIN不能用 -result 表示）
+    if ((!sign && result >> 31) || (sign && result > 0x80000000)) {
+        return 0x80000000u;
+    }
+
+    // ❗ 特别注意：return 的时候转换回 int 之前不要让它溢出
+    return sign ? (~result + 1) : result;
+
 }
