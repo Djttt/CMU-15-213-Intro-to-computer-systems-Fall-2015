@@ -1,0 +1,22 @@
+phase_1: Border relations with Canada have never been better.
+phase_2: 1 2 4 8 16 32
+
+# this a switch case control case
+phase_3: 0 207 or 1 0x137 or 2 0x2c3 or 3 0x100 or 4 0x185 or 5 0xce, etc.
+
+
+# judge input whether equal length / 2 (init lenght = 14)
+phase_4: 7 0 or (3, 0) or (1, 0). 
+
+phase_5: 
+input length: 6.
+cmp         $0x6, %eax
+ionufw
+
+
+phase_6: 
+read six numbers
+6 5 4 3 2 1
+
+
+
