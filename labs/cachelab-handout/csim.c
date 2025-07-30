@@ -12,6 +12,20 @@
 #include <stdio.h>
 #include <assert.h>
 
+static const char* HELP_STRING = "Usage: ./csim [-hv] -s <num> -E <num> -b <num> -t <file>\nOptions:\n \
+  -h\t\t Print this help message.\n \
+  -v\t\t Optional verbose flag.\n \
+  -s <num>\t Numberof of set index bits.\n \
+  -E <num>\t Number of lines per set.\n \
+  -b <num>\t Number of block offset bits.\n \
+  -t <file>\t Trace file.\n\n \
+Examples:\n \
+linux> ./csim -s 4 -E 1 -b 4 -t traces/yi.trace\n \
+linux> ./csim -v -s 8 -E 2 -b 4 -t traces/yi.trace\n";
+
+
+static const char* NUM_TO_CACHE_INFO[] = {"miss", "hit", "miss eviction"};
+
 
 int main(int argc, char** argv)
 {
@@ -23,20 +37,30 @@ int main(int argc, char** argv)
     // B: number of blocks
     int S, B;
     int opt;
+    int cache_flag_intern;
+    
+    // global lru counter
+    unsigned long time = 0;
+    
+    // default don't open verbose
+    int verbose = 0;
     
     char* tracefile;
     FILE* trace_file;       // file discriptor for trace file
     char identifier;        // identifier for access mode
-    unsigned address;       // memory address
+    unsigned long long address;       // memory address
     int size;               // read bytes size 
     
-    int hits, misses, evictions;
+    int hits = 0, misses = 0, evictions = 0;
 
     while((opt = getopt(argc, argv, "hvs:E:b:t:")) != -1) {
         switch(opt) {
             case 'h':
+                printf("%s", HELP_STRING);
+                return 0;
                 break;
             case 'v':
+                verbose = 1;
                 break;
             case 's':
                 s = atoi(optarg);
@@ -53,51 +77,82 @@ int main(int argc, char** argv)
             default:
                 printf("wrong argument\n");
                 break;
-            
         }
     }
 
     S = pow(2, s);
     B = pow(2, b);
-    cache_line** cache = (cache_line**)malloc(S * E * sizeof(cache_line));
-    init_cache_blocks(cache, B);
+    cache_line** cache = (cache_line**)malloc(S * sizeof(cache_line*));
+    for (int i = 0; i < S; i++) {
+        cache[i] = malloc(E * sizeof(cache_line));
+        for (int j = 0; j < E; j++) {
+            cache[i][j].valid = 0;
+            cache[i][j].tag = -1;
+            cache[i][j].lru_counter = 0;
+            cache[i][j].block = malloc(B);
+        }
+    }
+
     trace_file = fopen(tracefile, "r");
     
     // access main memory line by line
-    while(fscanf(trace_file, " %c %x,%d", &identifier, &address, &size) > 0) {
-        int s, tag, block_offset, cache_flag;
-        s = get_address_set(address);
-        tag = get_address_tag(address);
-        block_offset = get_address_block_offset(address);
+    // %llx don't use %x read 32 bits 
+    // trans.trace's address length is 35
+    while(fscanf(trace_file, " %c %llx,%d", &identifier, &address, &size) > 0) {
+        int cache_flag;
         switch (identifier) {
             case 'M':
                 /* modify operation, M is treated as once L followed 
                 by S at the same address */
-                cache_flag = cache_access(cache, s, tag, block_offset);
+                time++;
+                cache_flag = cache_access(cache, address, E, b, s, time);
                 modify_cache_state(cache_flag, &hits, &misses, &evictions);
-
+                cache_flag_intern = cache_flag;
                 // S operation
-                cache_flag = cache_access(cache, s, tag, block_offset);
+                time++;
+                cache_flag = cache_access(cache, address, E, b, s, time);
                 modify_cache_state(cache_flag, &hits, &misses, &evictions);
+                if (verbose) {
+                    if (cache_flag_intern == 1) {
+                        printf("M %llx, %d hits\n", address, size);
+                    }
+                    else {
+                        if (cache_flag_intern == -1) {
+                            printf("M %llx, %d miss eviction hit\n", address, size);
+                        }
+                        else {
+                            printf("M %llx, %d miss hit\n", address, size);
+                        }
+                    }
+                }
                 break;
             case 'L':
                 /* load operation */
-                cache_flag = cache_access(cache, s, tag, block_offset);
+                time++;
+                cache_flag = cache_access(cache, address, E, b, s, time);
                 modify_cache_state(cache_flag, &hits, &misses, &evictions);
                 break;
             case 'S':
                 /* data store operation */
-                cache_flag = cache_access(cache, s, tag, block_offset);
+                time++;
+                cache_flag = cache_access(cache, address, E, b, s, time);
                 modify_cache_state(cache_flag, &hits, &misses, &evictions);
                 break;
             default:
-                printf("wrong identifier for access mode!");
                 break;
+        }
+        if (verbose) {
+            if (identifier != 'M' && identifier != 'I') {
+                if (cache_flag == -1) {
+                    cache_flag = 2;
+                }
+                printf("%c %llx, %d %s\n", identifier, address, size, NUM_TO_CACHE_INFO[cache_flag]);
+            }
         }
     }
 
 
-    printSummary(0, 0, 0);
+    printSummary(hits, misses, evictions);
     free_cache_blocks(cache, S, E);
     fclose(trace_file);
     free(cache);
@@ -106,19 +161,19 @@ int main(int argc, char** argv)
 
 
 
-unsigned get_address_tag(unsigned address, int b, int s) {
-    return (address >> (b + s)) & 0xffffffff;
+unsigned get_address_tag(unsigned long long address, int b, int s) {
+    return (address >> (b + s));
 }
 
 
-unsigned get_address_set(unsigned address, int b, int s) {
+unsigned get_address_set(unsigned long long address, int b, int s) {
     address = address >> b;
     unsigned mask = (1u << s) - 1;
     return address & mask;
 }
 
 
-unsigned get_address_block_offset(unsigned address, int b, int s) {
+unsigned get_address_block_offset(unsigned long long address, int b, int s) {
     unsigned mask = (1u << b) - 1;
     return address & mask;
 }
@@ -126,70 +181,64 @@ unsigned get_address_block_offset(unsigned address, int b, int s) {
 
 void modify_cache_state(int cache_flag, int* hits, int* misses, int* eviction) {
     if (cache_flag == 1) {
-        *hits++;
+        (*hits)++;
     }
     else if (cache_flag == -1) {
-        *misses++;
-        *eviction++;
+        (*misses)++;
+        (*eviction)++;
     }
     else {
-        *misses++;
+        (*misses)++;
     }
 }
 
 
-static void check_Rep(cache_line* cache_line, int S, int B) {
-    assert(cache_line->valid == 0 || cache_line == 1);
-    assert(cache_line->lru_counter >= 0);
-}
+// static void check_Rep(cache_line* cache_line, int S, int B) {
+//     assert(cache_line->valid == 0 || cache_line->valid == 1);
+//     assert(cache_line->lru_counter >= 0);
+// }
 
 
-int init_cache_blocks(cache_line** cache, int S, int E, int B) {
-    int i = 0;
-    int j = 0;
-    for (; i < S; i++) {
-        for (; j < E; j++) {
-            cache[i][j].block = (int*)malloc(B * sizeof(int));
-        }
-    }
-}
 
-
-int cache_access(cache_line** cache, int S, int E, int tag, int block_offset) {
+int cache_access(cache_line** cache, unsigned long long address, int E, int b, int s, unsigned time) {
     int i = 0;
     int cache_flag;
+    unsigned long long tag = get_address_tag(address, b, s);
+    unsigned long long set_index = get_address_set(address, b, s);
+
     for (; i < E; i++) {
-        cache_line* cache_line = cache[S][i];
+        cache_line* cache_line = &cache[set_index][i];
         if(cache_line->valid && cache_line->tag == tag) {
             // hits
-            cache_line->lru_counter++;
+            cache_line->lru_counter = time;
             return 1;
         }
-        else {
-            cache_flag = cache_insert(cache, S, E, tag);
-        }
     }
+    
+    cache_flag = cache_insert(cache, set_index, E, tag, time);
+
     return cache_flag;
 }
 
 
-int cache_insert(cache_line** cache, int S, int E, int tag) {
+int cache_insert(cache_line** cache, int set_index, int E, int target_tag, unsigned time) {
     int i = 0;
     int lru_index;
     for (; i < E; i++) {
-        cache_line line = cache[S][i];
-        if (!line.valid) {
+        cache_line* line = &cache[set_index][i];
+        if (!line->valid) {
             // this cache line can insert
-            line.valid = 1;
-            line.tag = tag;
+            line->valid = 1;
+            line->tag = target_tag;
+            line->lru_counter = time;
             return 0;
         }
     }
     // run lru algorithm and update valid and tag field
-    lru_index = LRU(cache, S, E);
-    cache[S][lru_index].valid = 1;
-    cache[S][lru_index].tag = tag;
-    cache[S][lru_index].lru_counter = 1;
+    lru_index = LRU(cache, set_index, E);
+    cache[set_index][lru_index].valid = 1;
+    cache[set_index][lru_index].tag = target_tag;
+    cache[set_index][lru_index].lru_counter = time;
     return -1;
 }
 
@@ -211,10 +260,9 @@ int LRU(cache_line** cache, int s, int E) {
 
 
 void free_cache_blocks(cache_line** cache, int S, int E) {
-    int i = 0;
-    int j = 0;
-    for (; i < S; i++) {
-        for (; j < E; j++) {
+
+    for (int i = 0; i < S; i++) {
+        for (int j = 0; j < E; j++) {
             free(cache[i][j].block);
         }
     }

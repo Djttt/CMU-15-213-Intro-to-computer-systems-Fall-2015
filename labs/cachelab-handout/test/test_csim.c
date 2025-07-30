@@ -64,24 +64,90 @@ void test_modify_cache_state() {
 }
 
 
-void test_init_cache_blocks() {
-    
-}
-
 void test_cache_access() {
+    int S = 4;
+    int E = 2;
+    int s = 2;
+    int b = 2;
+    int cache_flag;
+    unsigned address = 0x0400d7d4;  
+    unsigned tag = get_address_tag(address, b, s);
+    unsigned set_index = get_address_set(address, b, s);
+    unsigned block_offset = get_address_block_offset(address, b, s);
+    cache_line** cache = (cache_line**)malloc(S * E * sizeof(cache_line));
+    
+    cache_flag = cache_access(cache, address, E, b, s);
+    assert(cache_flag == 0);
+    
+    cache_flag = cache_access(cache, set_index, E, tag, block_offset);
+    assert(cache_flag == 1);
+
+    free(cache);
 
 }
 
 
 void test_cache_insert() {
+    int s = 4;
+    int E = 1;
+    int b = 4;
+    int S = 16;
+    int tag;
+    int cache_insert_flag;
+    cache_line** cache = (cache_line**)malloc(S * E * sizeof(cache_line));
 
+    unsigned address = 10;
+    tag = get_address_tag(address, b, s);
+    cache_insert_flag = cache_insert(cache, S, E, tag);
+    assert(cache_insert_flag == 0);
+
+    free(cache);
 }
 
 
 void test_LRU() {
+    int s = 4;
+    int E = 1;
+    int b = 4;
+    int S = 16;
+    unsigned address = 10;
+    int cache_flag;
+    cache_line** cache = (cache_line**)malloc(S * E * sizeof(cache_line));
 
-}
+    cache_flag = cache_access(cache, address, E, b, s);
+    assert(cache_flag == 0);
+    
 
-void test_free_cache_blocks() {
+    // M access mode
+    address = 20;
+    cache_flag = cache_access(cache, address, E, b, s);
+    assert(cache_flag == 0);
+    cache_flag = cache_access(cache, address, E, b, s);
+    assert(cache_flag == 1);
 
+    address = 22;
+    cache_flag = cache_access(cache, address, E, b, s);
+    assert(cache_flag == 1);
+
+    address = 18;
+    cache_flag = cache_access(cache, address, E, b, s);
+    assert(cache_flag == 1);
+
+    address = 110;
+    cache_flag = cache_access(cache, address, E, b, s);
+    assert(cache_flag == -1);
+
+    address = 210;
+    cache_flag = cache_access(cache, address, E, b, s);
+    assert(cache_flag == -1);
+
+    // M access mode
+    address = 12;
+    cache_flag = cache_access(cache, address, E, b, s);
+    assert(cache_flag == -1);
+    cache_flag = cache_access(cache, address, E, b, s);
+    assert(cache_flag == 1);
+
+
+    free(cache);
 }

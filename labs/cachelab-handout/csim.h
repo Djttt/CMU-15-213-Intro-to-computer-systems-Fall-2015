@@ -27,7 +27,7 @@ typedef struct cache_line{
 /**
  * check rep_invariant 
  */
-static void check_Rep(cache_line* cache, int S, int B);
+// static void check_Rep(cache_line* cache, int S, int B);
 
 
 /**
@@ -36,80 +36,75 @@ static void check_Rep(cache_line* cache, int S, int B);
  * @param S sets numbers
  * @param E each set have E lines
  * @param B each cache init with B blocks
- * @return allocate memory success return 1, else return 0.
  */
-int init_cache_blocks(cache_line** cache, int S, int E, int B);
+void init_cache_blocks(cache_line** cache, int S, int E, int B);
 
 
 /**
  * access cache by inputing memory address, and memory address divided into three parts,
  * S, tag, block_offset. if access success, return 1. otherwise return 0.
  * @param cache target cache is 2D array of cache_line object
- * @param S set number of this main memory address for cache(0 < S < cache.length)
  * @param E each set havs E lines
- * @param tag tag number of main memory address (0 < tag < 2^(address_length - s - b))
- * @param block_offset block offset in cache line (0 < block_offset < 2^b)
+ * @param address unsigned main memory address
+ * @param b lower b bits to represent block offset
+ * @param s higher than b, s bits to represent set number
+ * @param time global timer variable counter memory assess number for lru algorithm
  * @return if this memory value already exited in cache(hit), return 1. otherwise(miss) if occur ecviction return -1, else return 0.
  */
-int cache_access(cache_line** cache, int S, int E, int tag, int block_offset);
+int cache_access(cache_line** cache, unsigned long long address, int E, int b, int s, unsigned time);
 
 
 /**
  * if cache missed, insert memory address's value to cache, 
  * and set up responding arguments
- * @param S insert target set number in cache(0 < S < cache.length)
+ * @param set_index insert target set number in cache(0 < S < cache.length)
  * @param E insert line number of set(0 < E < cache[0].length)
  * @param cache insert target cache
- * @param tag target memory address tag symbol
+ * @param target_tag target memory address tag symbol
+ * @param time global timer variable counter memory assess number for lru algorithm
  * @return insert with eviction return -1, insert without eviction return 0.
  */
-int cache_insert(cache_line** cache, int S, int E, int tag);
+int cache_insert(cache_line** cache, int set_index, int E, int target_tag, unsigned time);
 
 
 /**
  * least-recently used replacement policy implemention for choosing cache line to evict
  * @param cache target cache
  * @param s target set number for replace new main address value(0 < S < cache.length)
- * @param E insert line number of set(0 < E < cache[0].length)
+ *  @param E insert line number of set(0 < E < cache[0].length)
  * @return return replacement index in cache if success, otherwise return 0.
  */
 int LRU(cache_line** cache, int s, int E);
 
 
 /**
- * Free all blocks memory in cache
- */
-void free_cache_blocks(cache_line** cache);
-
-
-/**
  * Get main memory address' tag number which is used in cache
- * @param address unsigned hex number of main memory address 
+ * @param address unsigned long long hex number of main memory address 
  * @param b lower b bits to represent block offset
  * @param s higher than b, s bits to represent set number
  * @return tag symbol for cache 
  */
-unsigned get_address_tag(unsigned address, int b, int s);
+unsigned get_address_tag(unsigned long long address, int b, int s);
 
 
 /**
  * Get main memory address' set number which is used in cache
- * @param address unsigned hex number of main memory address 
+ * @param address unsigned long long hex number of main memory address 
  * @param b lower b bits to represent block offset
  * @param s higher than b, s bits to represent set number
  * @return set number for cache 
  */
-unsigned get_address_set(unsigned address, int b, int s);
+unsigned get_address_set(unsigned long long address, int b, int s);
 
 
 /**
  * Get main memory address' block offset number which is used in cache
- * @param address unsigned hex number of main memory address 
+ * @param address unsigned long long hex number of main memory address 
  * @param b lower b bits to represent block offset
  * @param s higher than b, s bits to represent set number
  * @return block offset for cache
  */
-unsigned get_address_block_offset(unsigned address, int b, int s);
+unsigned get_address_block_offset(unsigned long long address, int b, int s);
 
 
 /**
@@ -120,6 +115,12 @@ unsigned get_address_block_offset(unsigned address, int b, int s);
  * @param eviction int* pointer, eviction variable address
  */
 void modify_cache_state(int cache_flag, int* hits, int* misses, int* eviction);
+
+
+/**
+ * Free all blocks memory in cache
+ */
+void free_cache_blocks(cache_line** cache, int S, int E);
 
 #endif /* CACHE_SIMILATOR_H  */
 
