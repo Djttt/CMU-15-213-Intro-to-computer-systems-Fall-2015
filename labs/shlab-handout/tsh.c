@@ -3,6 +3,7 @@
  * 
  * <Put your name and login ID here>
  */
+#define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -165,6 +166,64 @@ int main(int argc, char **argv)
 */
 void eval(char *cmdline) 
 {
+    char *argv[MAXARGS];
+    char buf[MAXLINE];
+    int bg;
+    pid_t pid;
+
+    sigset_t mask_all, mask_one, prev_one;
+    sigfillset(&mask_all);
+    sigemptyset(&mask_one);
+    sigaddset(&mask_one, SIGCHLD);
+    
+
+    strcpy(buf, cmdline);
+    bg = parseline(buf, argv);
+    /* Null command line*/
+    if (argv[0] == NULL) {
+        return;
+    }
+    if (!builtin_cmd(argv)) {
+        sigprocmask(SIG_BLOCK, &mask_one, &prev_one);
+        if ((pid = fork()) == 0) {
+            /* Child process */
+            if (execve(argv[0], argv, environ) < 0) {
+                printf("%s: Command not found.\n", argv[0]);
+                exit(0);
+            }
+        }
+        if (!bg) {
+            /* fore ground execve */
+            int status;
+
+            sigprocmask(SIG_BLOCK, &mask_all, NULL);
+            addjob(jobs, pid, FG, cmdline);
+            sigprocmask(SIG_SETMASK, &prev_one, NULL);
+
+            if (waitpid(pid, &status, 0) < 0) {
+                unix_error("waitfg: waitpid error");
+            }
+            else {
+                sigprocmask(SIG_BLOCK, &mask_all, NULL);
+                deletejob(jobs, pid);
+                sigprocmask(SIG_SETMASK, &prev_one, NULL);
+                printf("ok\n");
+                return;
+            }
+        }
+
+        /* unblock SIGCHLD*/
+        pid = 0;
+        /* back ground execve */
+        sigprocmask(SIG_BLOCK, &mask_all, NULL);
+        addjob(jobs, pid, BG, cmdline);
+        sigprocmask(SIG_SETMASK, &prev_one, NULL);
+
+        while (!pid) {
+            sigsuspend(&prev_one);
+        }
+    }
+    
     return;
 }
 
@@ -231,6 +290,19 @@ int parseline(const char *cmdline, char **argv)
  */
 int builtin_cmd(char **argv) 
 {
+    char *builtin = argv[0];
+    if (strcmp(builtin, "quit")) {
+        exit(0);
+    }
+    else if (strcmp(builtin, "fg") || strcmp(builtin, "bg")) {
+        do_bgfg(argv);
+        return 1;
+    }
+    else if (strcmp(builtin, "jobs")) {
+        listjobs(jobs);
+        return 1;
+    }
+    
     return 0;     /* not a builtin command */
 }
 
@@ -238,7 +310,14 @@ int builtin_cmd(char **argv)
  * do_bgfg - Execute the builtin bg and fg commands
  */
 void do_bgfg(char **argv) 
-{
+{   
+    char *builtin = argv[0];
+    if (strcmp(builtin, "fg")) {
+        
+    }
+    else {
+        
+    }
     return;
 }
 
