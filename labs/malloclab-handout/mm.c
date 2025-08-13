@@ -35,275 +35,276 @@ team_t team = {
     ""
 };
 
-#define MAX_BLOCK_SIZE 16
-
-/* single word (4) or double word (8) alignment */
+/* Tunable constants */
 #define ALIGNMENT 8
-#define ALIGN(size) (((size) + (ALIGNMENT - 1)) & ~0x7)
+#define CHUNKSIZE (1<<12) /* 4KB extend size */
+#define MIN_BLOCK_SIZE 32
+
+/* Align `x` up to nearest multiple of ALIGNMENT */
+#define ALIGN(x) (((x) + (ALIGNMENT - 1)) & ~(ALIGNMENT - 1))
 #define SIZE_T_SIZE (ALIGN(sizeof(size_t)))
 
-/* 读写 header/footer（p 必须指向 header 或 footer） */
-#define GET(p)        (*(size_t *)(p))
-#define PUT(p, val)   (*(size_t *)(p) = (val))
-
-/* 打包 / 解包 */
+/* Basic header/footer operations (hdr/ftr point to size_t words) */
 #define PACK(size, alloc) ((size) | (alloc))
-#define GET_SIZE(p)   (GET(p) & ~0x7)   /* p = header 或 footer */
-#define GET_ALLOC(p)  (GET(p) & 0x1)    /* 0/1 */
+#define GET(p) (*(size_t *)(p))
+#define PUT(p, val) (*(size_t *)(p) = (val))
 
-/* 设置/清除 alloc 位（写回内存）*/
-#define SET_ALLOC_FLAG(p)   (PUT((p), GET(p) | (size_t)1))
-#define CLEAR_ALLOC_FLAG(p) (PUT((p), GET(p) & ~(size_t)1))
+#define GET_SIZE(p) (GET(p) & ~0x7)
+#define GET_ALLOC(p) (GET(p) & 0x1)
 
-/* 基于 payload bp 的常用偏移（bp 是 payload 指针） */
-#define HDRP(bp) ((char *)(bp) - SIZE_T_SIZE)                     /* payload -> header */
-#define FTRP(bp) ((char *)(bp) + GET_SIZE(HDRP(bp)) - 2*SIZE_T_SIZE) /* payload -> footer */
+/* Given a payload pointer `bp`, compute header/footer addresses.  In our
+   layout payload is after: HDR | NEXT | PREV  (3 size_t-sized fields). */
+#define HDRP(bp) ((char *)(bp) - 3 * SIZE_T_SIZE)
+#define FTRP(bp) (HDRP(bp) + GET_SIZE(HDRP(bp)) - SIZE_T_SIZE)
 
-/* 基于 header 的邻居计算（更直观、常用） */
-#define HDR_FROM_HDR_NEXT(hdr) ((char *)(hdr) + GET_SIZE(hdr))            /* next header */
-#define FTR_FROM_HDR(hdr)      ((char *)(hdr) + GET_SIZE(hdr) - SIZE_T_SIZE) /* footer of same block */
+/* Header-based navigation */
+#define HDR_FROM_HDR_NEXT(hdr) ((char *)(hdr) + GET_SIZE(hdr))
+#define FTR_FROM_HDR(hdr) ((char *)(hdr) + GET_SIZE(hdr) - SIZE_T_SIZE)
 
-/* 基于 payload 计算前一块和下一块（替代复杂宏） */
-#define NEXT_HDRP(bp)   (HDRP(bp) + GET_SIZE(HDRP(bp)))                       /* payload -> next header */
-#define NEXT_FTRP(bp)   (NEXT_HDRP(bp) + GET_SIZE(NEXT_HDRP(bp)) - SIZE_T_SIZE) /* payload -> next footer */
+/* next header from payload */
+#define NEXT_HDRP(bp) (HDRP(bp) + GET_SIZE(HDRP(bp)))
 
-/* 更安全地计算 prev footer/header：先用 cur header，然后回退 */
-#define PRE_FTRP(bp)    ((char *)HDRP(bp) - SIZE_T_SIZE) /* previous block's footer */
-#define PRE_HDRP(bp)    ((char *)PRE_FTRP(bp) - GET_SIZE(PRE_FTRP(bp)) + SIZE_T_SIZE)
+/* previous footer/header calculation (safe: prologue is allocated) */
+#define PRE_FTRP(bp) ((char *)HDRP(bp) - SIZE_T_SIZE)
+#define PRE_HDRP(bp) ((char *)PRE_FTRP(bp) - GET_SIZE(PRE_FTRP(bp)) + SIZE_T_SIZE)
 
+/* Free-list link accessors: these operate on the header-pointer address
+   where the next and prev pointers are stored at offsets +1*SIZE_T_SIZE,
+   +2*SIZE_T_SIZE respectively. We access them as void* pointers. */
+static inline void *get_next_free(char *hdr) { return *(void **)(hdr + SIZE_T_SIZE); }
+static inline void *get_prev_free(char *hdr) { return *(void **)(hdr + 2 * SIZE_T_SIZE); }
+static inline void set_next_free(char *hdr, void *ptr) { *(void **)(hdr + SIZE_T_SIZE) = ptr; }
+static inline void set_prev_free(char *hdr, void *ptr) { *(void **)(hdr + 2 * SIZE_T_SIZE) = ptr; }
 
-/* 
- * mm_init - initialize the malloc package.
- */
+/* Global free-list head (points to header of a free block) */
+static char *free_list_head = NULL;
+
+/* Forward declarations */
+static void *extend_heap(size_t words);
+static void insert_free_block(char *hdr);
+static void remove_free_block(char *hdr);
+static void *coalesce(char *hdr);
+static char *find_fit(size_t asize);
+static char *place_and_split(char *hdr, size_t asize);
+
+/* mm_init: create initial empty heap with prologue and epilogue */
 int mm_init(void)
 {
+    char *heap_start = mem_sbrk(5 * SIZE_T_SIZE);
+    if (heap_start == (void *) -1) return -1;
 
-    char *heap_start = mem_sbrk(4 * SIZE_T_SIZE);
-    if (heap_start == (void *)-1) {
-        return -1;
-    }
-    PUT(heap_start, 0);
-    PUT(heap_start + SIZE_T_SIZE, PACK(SIZE_T_SIZE, 1));
-    PUT(heap_start + 2 * SIZE_T_SIZE, PACK(SIZE_T_SIZE, 1));
-     PUT(heap_start + 3 * SIZE_T_SIZE, PACK(SIZE_T_SIZE, 1)); 
+    /* Prologue block: header | next | prev | footer (allocated) */
+    PUT(heap_start, PACK(4 * SIZE_T_SIZE, 1));              /* prologue header */
+    /* next / prev pointers of prologue (unused) */
+    set_next_free(heap_start, NULL);
+    set_prev_free(heap_start, NULL);
+    PUT(heap_start + 3 * SIZE_T_SIZE, PACK(4 * SIZE_T_SIZE, 1)); /* prologue footer */
 
-    size_t extend_size = 4096 + SIZE_T_SIZE;
-    char *bp = mem_sbrk(extend_size);
-    if (bp == (void *)-1) return -1;
-    PUT(bp, PACK(extend_size - SIZE_T_SIZE, 0));
-    PUT(bp + extend_size - 2 * SIZE_T_SIZE, PACK(extend_size - SIZE_T_SIZE, 0));
-    PUT(bp + extend_size - SIZE_T_SIZE, PACK(0, 1)); 
-    
+    /* Epilogue header */
+    PUT(heap_start + 4 * SIZE_T_SIZE, PACK(0, 1));
 
+    free_list_head = NULL;
+
+    /* Extend the empty heap with a free block of CHUNKSIZE bytes */
+    if (extend_heap(CHUNKSIZE / SIZE_T_SIZE) == NULL) return -1;
     return 0;
-
 }
 
-/* 
- * mm_malloc - Allocate a block by implicit list.
- * find a fist fit block and return this bolck address pointer.
- * each block have three parts: header, playload, footer. 
- * if not have fitted block, then use mm_sbrk to allcate heap memory.
- */
+/* extend_heap: extend heap by `words` words (size_t sized units). returns
+   pointer to payload of new free block or NULL on error. */
+static void *extend_heap(size_t words)
+{
+    size_t size = ALIGN(words * SIZE_T_SIZE);
+    if (size < MIN_BLOCK_SIZE) size = MIN_BLOCK_SIZE;
+
+    char *bp = mem_sbrk(size);
+    if (bp == (void *) -1) return NULL;
+
+    /* bp now points to where we'll write the new header. We'll set header
+       and footer then new epilogue. Note: mem_sbrk returns start of new area. */
+    PUT(bp, PACK(size, 0));                         /* free block header */
+    PUT(bp + size - SIZE_T_SIZE, PACK(size, 0));   /* free block footer */
+    PUT(bp + size, PACK(0, 1));                     /* new epilogue header */
+
+    /* coalesce and insert into free list */
+    char *new_hdr = coalesce(bp);
+    return (new_hdr == NULL) ? NULL : (void *)(new_hdr + 3 * SIZE_T_SIZE);
+}
+
+/* insert_free_block: insert header `hdr` at front of explicit free list */
+static void insert_free_block(char *hdr)
+{
+    if (!hdr) return;
+    set_next_free(hdr, free_list_head);
+    set_prev_free(hdr, NULL);
+    if (free_list_head) set_prev_free(free_list_head, hdr);
+    free_list_head = hdr;
+}
+
+/* remove_free_block: unlink `hdr` from explicit free list */
+static void remove_free_block(char *hdr)
+{
+    if (!hdr) return;
+    char *prev = get_prev_free(hdr);
+    char *next = get_next_free(hdr);
+
+    if (prev) set_next_free(prev, next);
+    else free_list_head = next;
+
+    if (next) set_prev_free(next, prev);
+}
+
+/* coalesce: hdr points to header of block being freed (or newly created free
+   block). Merge with adjacent free blocks if possible and return header of
+   resulting (coalesced) block. */
+static void *coalesce(char *hdr)
+{
+    /* payload pointer for convenience */
+    char *bp = hdr + 3 * SIZE_T_SIZE;
+    char *next_hdr = NEXT_HDRP(bp);
+
+    int prev_alloc = GET_ALLOC(PRE_FTRP(bp));
+    int next_alloc = GET_ALLOC(next_hdr);
+    size_t size = GET_SIZE(hdr);
+
+    if (prev_alloc && next_alloc) {
+        /* Case 1: both allocated, nothing to do */
+    } else if (prev_alloc && !next_alloc) {
+        /* Case 2: merge with next */
+        remove_free_block(next_hdr);
+        size += GET_SIZE(next_hdr);
+        PUT(hdr, PACK(size, 0));
+        PUT(hdr + size - SIZE_T_SIZE, PACK(size, 0));
+    } else if (!prev_alloc && next_alloc) {
+        /* Case 3: merge with previous */
+        char *prev_hdr = PRE_HDRP(bp);
+        remove_free_block(prev_hdr);
+        size += GET_SIZE(prev_hdr);
+        hdr = prev_hdr;
+        PUT(hdr, PACK(size, 0));
+        PUT(hdr + size - SIZE_T_SIZE, PACK(size, 0));
+    } else {
+        /* Case 4: merge both prev and next */
+        char *prev_hdr = PRE_HDRP(bp);
+        remove_free_block(prev_hdr);
+        remove_free_block(next_hdr);
+        size += GET_SIZE(prev_hdr) + GET_SIZE(next_hdr);
+        hdr = prev_hdr;
+        PUT(hdr, PACK(size, 0));
+        PUT(hdr + size - SIZE_T_SIZE, PACK(size, 0));
+    }
+
+    insert_free_block(hdr);
+    return hdr;
+}
+
+/* find_fit: first-fit search through free list for block >= asize; returns
+   header pointer or NULL if none found. */
+static char *find_fit(size_t asize)
+{
+    for (char *hdr = free_list_head; hdr != NULL; hdr = get_next_free(hdr)) {
+        size_t bsize = GET_SIZE(hdr);
+        if (!GET_ALLOC(hdr) && bsize >= asize) return hdr;
+    }
+    return NULL;
+}
+
+/* place_and_split: mark [hdr] as allocated; if remainder >= MIN_BLOCK_SIZE,
+   split and insert remaining free portion. Returns payload pointer. */
+static char *place_and_split(char *hdr, size_t asize)
+{
+    size_t bsize = GET_SIZE(hdr);
+    remove_free_block(hdr);
+
+    if (bsize - asize >= MIN_BLOCK_SIZE) {
+        /* Split: allocate front portion, leave remainder as free block */
+        PUT(hdr, PACK(asize, 1));
+        PUT(hdr + asize - SIZE_T_SIZE, PACK(asize, 1));
+
+        char *rem_hdr = hdr + asize;
+        size_t rem_size = bsize - asize;
+        PUT(rem_hdr, PACK(rem_size, 0));
+        PUT(rem_hdr + rem_size - SIZE_T_SIZE, PACK(rem_size, 0));
+        insert_free_block(rem_hdr);
+    } else {
+        /* No split; allocate whole block */
+        PUT(hdr, PACK(bsize, 1));
+        PUT(hdr + bsize - SIZE_T_SIZE, PACK(bsize, 1));
+    }
+
+    return hdr + 3 * SIZE_T_SIZE; /* payload pointer */
+}
+
+/* mm_malloc: allocate size bytes and return payload pointer */
 void *mm_malloc(size_t size)
 {
-    /* header  + playload + footer */
-    int newsize = ALIGN(size + SIZE_T_SIZE + SIZE_T_SIZE);
-  
-    char *start = mem_heap_lo();
-    char *end = mem_heap_hi();
-    int block_id = 0;
-    // printf("Heap start: %p\n", start);
-    // printf("Heap end: %p\n", end);
-    // printf("Heap size:  %zu bytes\n", (char *)end - (char *)start + 1);
-    char *p;     
-    p = start + 4 * SIZE_T_SIZE;
-    // printf("start malloc: origin size = %d, newsize = %d\n", size, newsize);
-    char *found = NULL;
-    // printf("init block size: %d\n", GET_SIZE(p));
-    while (GET_SIZE(p) > 0) { 
-        size_t block_size = GET_SIZE(p);
-        // printf("block id: %d, block alloc: %d, size: %d, header address: %p, footer address: %p\n", block_id, GET_ALLOC(p), GET_SIZE(p), p, FTRP(p + SIZE_T_SIZE));
-        if (block_size == 0) {
-            printf("Wrong! block size equals 0\n");
-            break;
-        }
-        
-        if (!GET_ALLOC(p) && block_size >= newsize) {
-            found = p;
-            // printf("find block: %d to allocate\n", block_id);
-            // break;
-        }
-        // printf("block id: %d, block size: %d, block header address: %p, block footer address: %p\n",
-        // block_id, block_size, p, FTRP(p + SIZE_T_SIZE);
-        block_id++;
-        p = (char *)p + block_size;
-    }
+    if (size == 0) return NULL;
 
-    /* don't find fitted block */
-    if (!found) {   
-        char *newptr = mem_sbrk(newsize);
-        // printf("sbrk new block address: %p\n", newptr);
-        if (newptr == (void *)-1) {
-            fprintf(stderr, "mem_sbrk failed: request %d bytes, heap size = %ld\n", newsize, mem_heapsize());
-            return NULL;
-        }
+    /* Compute adjusted block size: header + next + prev + payload + footer */
+    size_t asize = ALIGN(size + 4 * SIZE_T_SIZE);
+    if (asize < MIN_BLOCK_SIZE) asize = MIN_BLOCK_SIZE;
 
-        PUT(newptr - SIZE_T_SIZE, PACK(newsize, 1));
-        PUT(newptr + newsize - 2 * SIZE_T_SIZE, PACK(newsize, 1));
-        /* update epilogue block */
-        PUT(newptr + newsize - SIZE_T_SIZE, PACK(0, 1));
-        return (void *)((char *)newptr);
-    }
+    /* Search free list */
+    char *hdr = find_fit(asize);
+    if (hdr) return place_and_split(hdr, asize);
 
-    size_t orig = GET_SIZE(found);
-    if (orig - newsize > MAX_BLOCK_SIZE) {
-        /* split the block */
-        PUT(found, PACK(newsize, 1));
-        PUT(found + newsize - SIZE_T_SIZE, PACK(newsize, 1));
+    /* No fit found --- extend heap */
+    size_t extend_size = (asize > CHUNKSIZE) ? asize : CHUNKSIZE;
+    char *bp = extend_heap(extend_size / SIZE_T_SIZE);
+    if (!bp) return NULL;
 
-        PUT(found + newsize, PACK(orig - newsize, 0));
-        PUT(found + orig - SIZE_T_SIZE, PACK(orig - newsize, 0));
-    }
-    else {
-        PUT(found, PACK(orig, 1));
-        PUT(found + orig - SIZE_T_SIZE, PACK(orig, 1));
-    }
-
-    // mm_check();
-    return (void *)((char *)found + SIZE_T_SIZE);
+    /* bp returned is payload pointer; header is bp - 3*SIZE_T_SIZE */
+    return place_and_split(HDRP(bp), asize);
 }
 
-/**
- * select coalesce policy, there are four situations.
- * if memory is like [alloc, alloc(to free), alloc] return 0.
- * [alloc, alloc(to free), free] return 1.
- * [free, alloc(to free), alloc] return 2.
- * [free, alloc(to free), free] return 3.      
- * @param bp indicate the start address of one block, which will be to free
- * @return return different number represents different situations.
- */
-int coalesce_policy(void *bp) {
-    void *pre_footer, *next_header;
-    pre_footer = PRE_FTRP(bp);
-    next_header = NEXT_HDRP(bp);
-
-    int pre_alloc = GET_ALLOC(pre_footer);
-    int next_alloc = GET_ALLOC(next_header);
-
-    if (pre_alloc && next_alloc) {
-        return 0;
-    }
-    else if (pre_alloc && !next_alloc) {
-        return 1;
-    }
-    else if (!pre_alloc && next_alloc) {
-        return 2;
-    }
-    else if (!pre_alloc && !next_alloc) {
-        return 3;
-    }
-    else {
-        return -1;
-    }
-}
-/*
- * mm_free - Freeing a block does nothing.
- */
+/* mm_free: free a previously allocated payload pointer */
 void mm_free(void *ptr)
 {
-    int situation_flag;
-    void* cur_header = (char *)ptr - SIZE_T_SIZE;
-    void* cur_footer = (char *)ptr + GET_SIZE(cur_header) - 2 * SIZE_T_SIZE;
-    // printf("Free one block at adress: %p\n", cur_header);
-    if (!GET_ALLOC(cur_header)) {
-        return NULL;
-    }
-    
-    /* if block allocated, there are four situation to coalescing */
-    /* situation one */
-    situation_flag = coalesce_policy(ptr);
-    if (situation_flag == 0) {
-        PUT(cur_header, PACK(GET_SIZE(cur_header), 0));
-        PUT(cur_footer, PACK(GET_SIZE(cur_header), 0));
-    }
-    else if (situation_flag == 1) {
-        void *next_footer = NEXT_FTRP(ptr);
-        int next_block_len = GET_SIZE(next_footer);
-        int cur_block_len = GET_SIZE(cur_header);
+    if (!ptr) return;
 
-        int total_len = next_block_len + cur_block_len;
-        PUT(cur_header, PACK(total_len, 0)); 
-        PUT(next_footer, PACK(total_len, 0));
-    } 
-    else if (situation_flag == 2) {
-        void *pre_header = PRE_HDRP(ptr);
-        int pre_block_len = GET_SIZE(pre_header);
-        int cur_block_len = GET_SIZE(cur_header);
+    char *hdr = HDRP(ptr);
+    if (!GET_ALLOC(hdr)) return; /* already free */
 
-        int total_len = pre_block_len + cur_block_len;
-        PUT(cur_footer , PACK(total_len, 0)); 
-        PUT(pre_header, PACK(total_len, 0));
-    }
-    else if (situation_flag == 3){
-        void *pre_header = PRE_HDRP(ptr);
-        void *next_footer = NEXT_FTRP(ptr);
-        
-        int pre_block_len = GET_SIZE(pre_header);
-        int cur_block_len = GET_SIZE(cur_header);
-        int next_block_len = GET_SIZE(next_footer);
-
-        int total_len = pre_block_len + cur_block_len + next_block_len;
-        PUT(pre_header, PACK(total_len, 0));
-        PUT(next_footer, PACK(total_len, 0));
-    }
-    else {
-        printf("Error free situation!\n");
-    }
-   // print_memory_block();
-   // mm_check();
+    size_t size = GET_SIZE(hdr);
+    PUT(hdr, PACK(size, 0));
+    PUT(hdr + size - SIZE_T_SIZE, PACK(size, 0));
+    coalesce(hdr);
 }
 
-/*
- * mm_realloc - Implemented simply in terms of mm_malloc and mm_free
- */
+/* mm_realloc: simple implement using malloc/copy/free */
 void *mm_realloc(void *ptr, size_t size)
 {
-    void *oldptr = ptr;
-    void *newptr;
-    size_t copySize;
-    // printf("call realloc\n");
-    if (!ptr && size > 0) {
-        /* ptr == NULL */
-        newptr = mm_malloc(size);
-        if (!newptr) {
-            return NULL;
-        }
-        return newptr;
-    }
+    if (ptr == NULL) return mm_malloc(size);
+    if (size == 0) { mm_free(ptr); return NULL; }
 
-    if (!size) {
-        /* size == 0 */
-        mm_free(ptr);
-        return NULL;
-    }
+    size_t old_size = GET_SIZE(HDRP(ptr));
+    size_t copy_size = old_size - 4 * SIZE_T_SIZE; /* payload bytes available */
+    if (copy_size > size) copy_size = size;
 
-    newptr = mm_malloc(size);
-    copySize = GET_SIZE(HDRP(oldptr)) - 2 * SIZE_T_SIZE;
-    if (size < copySize) {
-        copySize = size;
-    }
-    memcpy(newptr, oldptr, copySize);
-    mm_free(oldptr);
-    // mm_check();
+    void *newptr = mm_malloc(size);
+    if (!newptr) return NULL;
+    memcpy(newptr, ptr, copy_size);
+    mm_free(ptr);
     return newptr;
 }
+
+/* Optional: utility to dump free list (for debugging) */
+#ifdef DEBUG
+void dump_free_list(void)
+{
+    fprintf(stderr, "Free list:");
+    for (char *hdr = free_list_head; hdr != NULL; hdr = get_next_free(hdr)) {
+        fprintf(stderr, " -> [%p sz=%zu]", hdr, GET_SIZE(hdr));
+    }
+    fprintf(stderr, "\n");
+}
+#endif
 
 /**
  * Memory checker for checking memory invariant.
  */
 int mm_check(void) {
-    void *start = mem_heap_lo();
+    void *start = free_list_head;
     void *end = mem_heap_hi();
     char *p = (char *)start + 4 * SIZE_T_SIZE;
     int block_counter = 0;
@@ -367,29 +368,6 @@ int mm_check(void) {
 }
 
 
-/**
- * helper function - print memory blocks address and other helpful information for debugging
- */
-void print_memory_block() {
-    void *start = mem_heap_lo();
-    void *end = mem_heap_hi();
-    char *p = (char *)start + 3 * SIZE_T_SIZE;
-    int block_counter = 0;
-
-
-    while (GET_SIZE(p) > 0) {
-        int blk_size = GET_SIZE(p);
-        void *cur_header = p;
-        void *cur_footer = FTRP(p + SIZE_T_SIZE);
-
-        int cur_alloc = GET_ALLOC(p);
-
-        printf("block id: %d, block alloc: %d, block size: %d\n", block_counter, cur_alloc, blk_size);
-        printf("block header: %p, block footer: %p\n", p, cur_footer);
-        p += blk_size;
-        block_counter++;
-    }
-}
 
 
 
