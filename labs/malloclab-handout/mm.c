@@ -76,8 +76,21 @@ static inline void *get_prev_free(char *hdr) { return *(void **)(hdr + 2 * SIZE_
 static inline void set_next_free(char *hdr, void *ptr) { *(void **)(hdr + SIZE_T_SIZE) = ptr; }
 static inline void set_prev_free(char *hdr, void *ptr) { *(void **)(hdr + 2 * SIZE_T_SIZE) = ptr; }
 
+/* separate list number */
+#define LIST_CLASS 10
+
 /* Global free-list head (points to header of a free block) */
-static char *free_list_head = NULL;
+static char *free_list[LIST_CLASS]; 
+
+static int get_list_index(size_t size) {
+    int idx = 0;
+    size_t s = 16;
+    while (idx < LIST_CLASS - 1 && size > s) {
+        s <<= 2;
+        idx++;
+    }
+    return idx;
+}
 
 /* Forward declarations */
 static void *extend_heap(size_t words);
@@ -103,7 +116,7 @@ int mm_init(void)
     /* Epilogue header */
     PUT(heap_start + 4 * SIZE_T_SIZE, PACK(0, 1));
 
-    free_list_head = NULL;
+    for (int i = 0; i < LIST_CLASS; i++) { free_list[i] = NULL; }
 
     /* Extend the empty heap with a free block of CHUNKSIZE bytes */
     if (extend_heap(CHUNKSIZE / SIZE_T_SIZE) == NULL) return -1;
@@ -135,21 +148,23 @@ static void *extend_heap(size_t words)
 static void insert_free_block(char *hdr)
 {
     if (!hdr) return;
-    set_next_free(hdr, free_list_head);
+    int idx = get_list_index(GET_SIZE(hdr));
+    set_next_free(hdr, free_list[idx]);
     set_prev_free(hdr, NULL);
-    if (free_list_head) set_prev_free(free_list_head, hdr);
-    free_list_head = hdr;
+    if (free_list[idx]) set_prev_free(free_list[idx], hdr);
+    free_list[idx] = hdr;
 }
 
 /* remove_free_block: unlink `hdr` from explicit free list */
 static void remove_free_block(char *hdr)
 {
     if (!hdr) return;
+    int idx = get_list_index(GET_SIZE(hdr));
     char *prev = get_prev_free(hdr);
     char *next = get_next_free(hdr);
 
     if (prev) set_next_free(prev, next);
-    else free_list_head = next;
+    else free_list[idx] = next;
 
     if (next) set_prev_free(next, prev);
 }
@@ -202,11 +217,15 @@ static void *coalesce(char *hdr)
    header pointer or NULL if none found. */
 static char *find_fit(size_t asize)
 {
-    for (char *hdr = free_list_head; hdr != NULL; hdr = get_next_free(hdr)) {
-        size_t bsize = GET_SIZE(hdr);
-        if (!GET_ALLOC(hdr) && bsize >= asize) return hdr;
+    int idx = get_list_index(asize);
+    for (; idx < LIST_CLASS; idx ++) {
+        for (char *hdr = free_list[idx]; hdr != NULL; hdr = get_next_free(hdr)) {
+            size_t bsize = GET_SIZE(hdr);
+            if (!GET_ALLOC(hdr) && bsize >= asize) return hdr;
+        }
     }
-    return NULL;
+
+    return NULL;    
 }
 
 /* place_and_split: mark [hdr] as allocated; if remainder >= MIN_BLOCK_SIZE,
@@ -304,7 +323,7 @@ void dump_free_list(void)
  * Memory checker for checking memory invariant.
  */
 int mm_check(void) {
-    void *start = free_list_head;
+    void *start = NULL;
     void *end = mem_heap_hi();
     char *p = (char *)start + 4 * SIZE_T_SIZE;
     int block_counter = 0;
@@ -368,6 +387,29 @@ int mm_check(void) {
 }
 
 
+/**
+ * helper function - print memory blocks address and other helpful information for debugging
+ */
+void print_memory_block() {
+    void *start = mem_heap_lo();
+    void *end = mem_heap_hi();
+    char *p = (char *)start + 3 * SIZE_T_SIZE;
+    int block_counter = 0;
+
+
+    while (GET_SIZE(p) > 0) {
+        int blk_size = GET_SIZE(p);
+        void *cur_header = p;
+        void *cur_footer = FTRP(p + SIZE_T_SIZE);
+
+        int cur_alloc = GET_ALLOC(p);
+
+        printf("block id: %d, block alloc: %d, block size: %d\n", block_counter, cur_alloc, blk_size);
+        printf("block header: %p, block footer: %p\n", p, cur_footer);
+        p += blk_size;
+        block_counter++;
+    }
+}
 
 
 
