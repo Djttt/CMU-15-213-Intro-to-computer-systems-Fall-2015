@@ -12,7 +12,7 @@
 /* sbuf size */
 #define SBUF_SIZE 20
 /* n threads */
-#define NTHREADS 10
+#define NTHREADS 4
 /* You won't lose style points for including this long line in your code */
 static const char *user_agent_hdr = "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:10.0.3) Gecko/20120305 Firefox/10.0.3\r\n";
 
@@ -83,52 +83,60 @@ int main(int argc, char **argv)
 void *doit() 
 {
     Pthread_detach(pthread_self());
-    int clientfd;
-    char buf[MAXLINE], method[MAXLINE], uri[MAXLINE], version[MAXLINE];
-    rio_t rio;
-    int hdr_len;
-    char http_request[MAXLINE];
-    char host[MAXLINE], path[MAXLINE], port[MAXLINE];
-    char request_headers[MAXLINE];
+    int fd;
+    while (1) {
+        fd = sbuf_remove(&sbuf);
+        int clientfd;
+        char buf[MAXLINE], method[MAXLINE], uri[MAXLINE], version[MAXLINE];
+        rio_t rio;
+        int hdr_len;
+        char http_request[MAXLINE];
+        char host[MAXLINE], path[MAXLINE], port[MAXLINE];
+        char request_headers[MAXLINE];
 
-    /* server response variable */
-    rio_t server_rio;
-    char response_buf[MAXBUF];
-    ssize_t n;
-    int fd = sbuf_remove(&sbuf);
+        /* server response variable */
+        rio_t server_rio;
+        char response_buf[MAXBUF];
+        ssize_t n;
 
-    /* Read request line and headers */
-    Rio_readinitb(&rio, fd);
-    if (!Rio_readlineb(&rio, buf, MAXLINE))  //line:netp:doit:readrequest
-        return;
-    printf("%s", buf);
-    sscanf(buf, "%s %s %s", method, uri, version);       //line:netp:doit:parserequest
-    if (strcasecmp(method, "GET")) {                     //line:netp:doit:beginrequesterr
-        clienterror(fd, method, "501", "Not Implemented",
-                    "Tiny does not implement this method");
-        return;
-    }        
-    /* parse http request to header information */                                            //line:netp:doit:endrequesterr
-    hdr_len = read_requesthdrs_save(&rio, request_headers, sizeof(request_headers));     //line:netp:doit:readrequesthdrs
-    
-    /* parse uri to get host, path and port information */
-    parse_uri_proxy(uri, host, path, port);
-    
-    /* build http request */
-    build_http_request(http_request, method, path, host, request_headers);
 
-    clientfd = Open_clientfd(host, port);
-    Rio_writen(clientfd, http_request, strlen(http_request));
+        /* Read request line and headers */
+        Rio_readinitb(&rio, fd);
+        if (!Rio_readlineb(&rio, buf, MAXLINE)) {
+            Close(fd);
+            continue;
+        }
 
-    Rio_readinitb(&server_rio, clientfd);
-    while ((n = Rio_readnb(&server_rio, response_buf, MAXBUF)) > 0) {
-        Rio_writen(fd, response_buf, n);
+        printf("%s", buf);
+        sscanf(buf, "%s %s %s", method, uri, version);       //line:netp:doit:parserequest
+        if (strcasecmp(method, "GET")) {                     //line:netp:doit:beginrequesterr
+            clienterror(fd, method, "501", "Not Implemented",
+                        "Tiny does not implement this method");
+            Close(fd);
+            continue;
+        }        
+        /* parse http request to header information */                                            //line:netp:doit:endrequesterr
+        hdr_len = read_requesthdrs_save(&rio, request_headers, sizeof(request_headers));     //line:netp:doit:readrequesthdrs
+        
+        /* parse uri to get host, path and port information */
+        parse_uri_proxy(uri, host, path, port);
+        
+        /* build http request */
+        build_http_request(http_request, method, path, host, request_headers);
+
+        clientfd = Open_clientfd(host, port);
+        Rio_writen(clientfd, http_request, strlen(http_request));
+
+        Rio_readinitb(&server_rio, clientfd);
+        while ((n = Rio_readnb(&server_rio, response_buf, MAXBUF)) > 0) {
+            Rio_writen(fd, response_buf, n);
+        }
+
+        /* file send over */
+        Close(fd);
+        Close(clientfd);
     }
 
-    /* file send over */
-    Close(fd);
-    Close(clientfd);
-    return NULL;
 }
 /* $end doit */
 
@@ -136,26 +144,19 @@ void *doit()
  * read_requesthdrs - read HTTP request headers
  */
 /* $begin read_requesthdrs */
-int read_requesthdrs_save(rio_t *rp, char *headers_buf, int maxlen) 
-{
+int read_requesthdrs_save(rio_t *rp, char *headers_buf, int maxlen) {
     char buf[MAXLINE];
     int total_len = 0;
 
-    /* read first line in header */
-    Rio_readlineb(rp, buf, MAXLINE);
-    while(strcmp(buf, "\r\n")) {          //line:netp:readhdrs:checkterm
+    while (Rio_readlineb(rp, buf, MAXLINE) > 0) {
+        if (!strcmp(buf, "\r\n")) break;  // 读到空行
         int len = strlen(buf);
         if (total_len + len < maxlen - 1) {
             memcpy(headers_buf + total_len, buf, len);
-            total_len += len;    
+            total_len += len;
         }
-        Rio_readlineb(rp, buf, MAXLINE);
     }
 
-    if (total_len < maxlen - 3) {
-        headers_buf[total_len++] = '\r';
-        headers_buf[total_len++] = '\n';
-    }
     headers_buf[total_len] = '\0';
     return total_len;
 }
@@ -212,18 +213,21 @@ void build_http_request(char *http_request, const char *method,
     /* build http request line */
     sprintf(http_request, "%s %s HTTP/1.0\r\n", method, path);
 
+    /* rebuild request headers */
+    sprintf(http_request + strlen(http_request), "%s", headers);
+    /* host name */
+    sprintf(http_request + strlen(http_request), "Host: %s\r\n", host);
     /* user-agent model */
     sprintf(http_request + strlen(http_request), "%s", user_agent_hdr);
 
     /* connection and proxy-connection headers */
     sprintf(http_request + strlen(http_request), "Connection: close\r\n");
-    sprintf(http_request + strlen(http_request), "Proxy-connection: close\r\n");
+    sprintf(http_request + strlen(http_request), "Proxy-Connection: close\r\n");
 
-    /* rebuild request headers */
-    sprintf(http_request + strlen(http_request), "%s", headers);
+
     
     /* end header */
-    sprintf(http_request + strlen(http_request), "\r\n");;
+    sprintf(http_request + strlen(http_request), "\r\n");
     
 }
 /* $end parse_uri */
@@ -347,7 +351,8 @@ void sbuf_deinit(sbuf_t *sp) {
 void sbuf_insert(sbuf_t *sp, int item) {
     P(&sp->slots);
     P(&sp->mutex);
-    sp->buf[(++sp->rear) % (sp->n)] = item;
+    sp->buf[sp->rear] = item;
+    sp->rear = (sp->rear + 1) % sp->n;
     V(&sp->mutex);
     V(&sp->items);
 }
@@ -357,7 +362,8 @@ int sbuf_remove(sbuf_t *sp) {
     int item;
     P(&sp->items);
     P(&sp->mutex);
-    item = sp->buf[(++sp->front) % (sp->n)];
+    item = sp->buf[sp->front];
+    sp->front = (sp->front + 1) % sp->n;
     V(&sp->mutex);
     V(&sp->slots);
     
