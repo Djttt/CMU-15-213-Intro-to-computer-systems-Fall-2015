@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include "csapp.h"
 #include <netdb.h>
+#include "cache.h"
 
 /* Recommended max cache and object sizes */
 #define MAX_CACHE_SIZE 1049000
@@ -45,6 +46,7 @@ void clienterror(int fd, char *cause, char *errnum,
          char *shortmsg, char *longmsg);
 
 sbuf_t sbuf;
+cache_t cache;
 
 int main(int argc, char **argv)  
 {
@@ -62,6 +64,7 @@ int main(int argc, char **argv)
 
     listenfd = Open_listenfd(argv[1]);
     sbuf_init(&sbuf, SBUF_SIZE);
+    cache_init(&cache);
     for (int i = 0; i < NTHREADS; i++) {
         pthread_create(&tid, NULL, doit, NULL);
     }
@@ -84,6 +87,7 @@ void *doit()
 {
     Pthread_detach(pthread_self());
     int fd;
+    cache_obj_t *obj = NULL;
     while (1) {
         fd = sbuf_remove(&sbuf);
         int clientfd;
@@ -97,6 +101,8 @@ void *doit()
         /* server response variable */
         rio_t server_rio;
         char response_buf[MAXBUF];
+        char object_buf[MAX_OBJECT_SIZE];
+        int object_size = 0;
         ssize_t n;
 
 
@@ -114,29 +120,44 @@ void *doit()
                         "Tiny does not implement this method");
             Close(fd);
             continue;
-        }        
-        /* parse http request to header information */                                            //line:netp:doit:endrequesterr
-        hdr_len = read_requesthdrs_save(&rio, request_headers, sizeof(request_headers));     //line:netp:doit:readrequesthdrs
-        
-        /* parse uri to get host, path and port information */
-        parse_uri_proxy(uri, host, path, port);
-        
-        /* build http request */
-        build_http_request(http_request, method, path, host, request_headers);
+        }     
 
-        clientfd = Open_clientfd(host, port);
-        Rio_writen(clientfd, http_request, strlen(http_request));
+        obj = Cache_lookup(&cache, uri);
+        if (obj) {
+            memcpy(object_buf, obj->buf, obj->size);
+            Rio_writen(fd, object_buf, obj->size);
+        }
+        else {
+            /* parse http request to header information */                                            
+            hdr_len = read_requesthdrs_save(&rio, request_headers, sizeof(request_headers));     
+            
+            /* parse uri to get host, path and port information */
+            parse_uri_proxy(uri, host, path, port);
+            
+            /* build http request */
+            build_http_request(http_request, method, path, host, request_headers);
 
-        Rio_readinitb(&server_rio, clientfd);
-        while ((n = Rio_readnb(&server_rio, response_buf, MAXBUF)) > 0) {
-            Rio_writen(fd, response_buf, n);
+            clientfd = Open_clientfd(host, port);
+            Rio_writen(clientfd, http_request, strlen(http_request));
+            Rio_readinitb(&server_rio, clientfd);
+            while ((n = Rio_readnb(&server_rio, response_buf, MAXBUF)) > 0) {
+                Rio_writen(fd, response_buf, n);
+
+                if (object_size + n <= MAX_OBJECT_SIZE) {
+                    memcpy(object_buf + object_size, response_buf, n);
+                    object_size += n;
+                }
+            }
+            if (object_size <= MAX_OBJECT_SIZE) {
+                Cache_insert(&cache, uri, object_buf, object_size);
+            }
+
+            Close(clientfd);
         }
 
         /* file send over */
         Close(fd);
-        Close(clientfd);
     }
-
 }
 /* $end doit */
 
@@ -232,75 +253,6 @@ void build_http_request(char *http_request, const char *method,
 }
 /* $end parse_uri */
 
-/*
- * serve_static - copy a file back to the client 
- */
-/* $begin serve_static */
-void serve_static(int fd, char *filename, int filesize)
-{
-    int srcfd;
-    char *srcp, filetype[MAXLINE], buf[MAXBUF];
-
-    /* Send response headers to client */
-    get_filetype(filename, filetype);    //line:netp:servestatic:getfiletype
-    sprintf(buf, "HTTP/1.0 200 OK\r\n"); //line:netp:servestatic:beginserve
-    Rio_writen(fd, buf, strlen(buf));
-    sprintf(buf, "Server: Tiny Web Server\r\n");
-    Rio_writen(fd, buf, strlen(buf));
-    sprintf(buf, "Content-length: %d\r\n", filesize);
-    Rio_writen(fd, buf, strlen(buf));
-    sprintf(buf, "Content-type: %s\r\n\r\n", filetype);
-    Rio_writen(fd, buf, strlen(buf));    //line:netp:servestatic:endserve
-
-    /* Send response body to client */
-    srcfd = Open(filename, O_RDONLY, 0); //line:netp:servestatic:open
-    srcp = Mmap(0, filesize, PROT_READ, MAP_PRIVATE, srcfd, 0); //line:netp:servestatic:mmap
-    Close(srcfd);                       //line:netp:servestatic:close
-    Rio_writen(fd, srcp, filesize);     //line:netp:servestatic:write
-    Munmap(srcp, filesize);             //line:netp:servestatic:munmap
-}
-
-/*
- * get_filetype - derive file type from file name
- */
-void get_filetype(char *filename, char *filetype) 
-{
-    if (strstr(filename, ".html"))
-    strcpy(filetype, "text/html");
-    else if (strstr(filename, ".gif"))
-    strcpy(filetype, "image/gif");
-    else if (strstr(filename, ".png"))
-    strcpy(filetype, "image/png");
-    else if (strstr(filename, ".jpg"))
-    strcpy(filetype, "image/jpeg");
-    else
-    strcpy(filetype, "text/plain");
-}  
-/* $end serve_static */
-
-/*
- * serve_dynamic - run a CGI program on behalf of the client
- */
-/* $begin serve_dynamic */
-void serve_dynamic(int fd, char *filename, char *cgiargs) 
-{
-    char buf[MAXLINE], *emptylist[] = { NULL };
-
-    /* Return first part of HTTP response */
-    sprintf(buf, "HTTP/1.0 200 OK\r\n"); 
-    Rio_writen(fd, buf, strlen(buf));
-    sprintf(buf, "Server: Tiny Web Server\r\n");
-    Rio_writen(fd, buf, strlen(buf));
-  
-    if (Fork() == 0) { /* Child */ //line:netp:servedynamic:fork
-    /* Real server would set all CGI vars here */
-    setenv("QUERY_STRING", cgiargs, 1); //line:netp:servedynamic:setenv
-    Dup2(fd, STDOUT_FILENO);         /* Redirect stdout to client */ //line:netp:servedynamic:dup2
-    Execve(filename, emptylist, environ); /* Run CGI program */ //line:netp:servedynamic:execve
-    }
-    Wait(NULL); /* Parent waits for and reaps child */ //line:netp:servedynamic:wait
-}
-/* $end serve_dynamic */
 
 /*
  * clienterror - returns an error message to the client
